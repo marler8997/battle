@@ -1,0 +1,516 @@
+<html><head>
+<style type="text/css">
+* {margin:0;padding:0;font-family: Arial}
+</style>
+  <script type="text/javascript" src="FixedFps.js"></script>
+  <script type="text/javascript" src="ImageLoader.js"></script>
+  <script type="text/javascript" src="AudioLoader.js"></script>
+  <script type="text/javascript" src="Tiles.js"></script>
+  <script type="text/javascript" src="Input.js"></script>
+  <script type="text/javascript" src="TwoDimIterator.js"></script>
+<script type="text/javascript">
+
+function get(name) {
+  return document.getElementById(name)
+}
+
+var global = {
+  ctx: null,
+  canvas: null,
+  pixelsPerUnitX: 0,
+  pixelsPerUnitY: 0,
+  updatesToPaint: 0,
+
+  currentLevel: null,
+  fixedFpsLooper: null,
+  tilesetImg: null,
+  jumpSound: null,
+};
+var TWO_PI = Math.PI*2;
+
+// GAME DATA
+var widthHeightRatio = 6/3;
+var viewHeightGame = 512;
+var viewWidthGame = viewHeightGame * widthHeightRatio;
+var controls = {
+  left: charToKeyCode('a'),
+  right: charToKeyCode('d'),
+  up: charToKeyCode('w'),
+  down: charToKeyCode('s'),
+  run: charToKeyCode('o'),
+  jump: charToKeyCode('p'),
+};
+var player = {
+  width: 32,
+  height:32,
+  x: 0,
+  y: 0,
+  velocityX: 0,
+  velocityY: 0,
+  jumpFrames: 0,
+};
+var camera = {
+  x: 0,
+  y: 0,
+};
+var ball = 0;
+
+function updateFrame() {
+  var walkSpeed = 5;
+  var runMultiplier = 1.8;
+
+  if(keysDown[controls.left]) {
+    if(keysDown[controls.right]) {
+      player.velocityX = 0;
+    } else {
+      player.velocityX = -walkSpeed;
+    }
+  } else if(keysDown[controls.right]) {
+    player.velocityX = walkSpeed;
+  } else {
+    player.velocityX = 0;
+  }
+  if(keysDown[controls.run]) {
+    player.velocityX*=2;
+  }
+
+  // TODO: should I allow jump to be pre-held?
+  var jumpPower = 9;
+  var maxJumpFrames = 12;
+  if (player.jumpFrames == 0) {
+    if (keysDown[controls.jump]) {
+      if (collision({x:player.x,y:player.y-1,width:player.width,height:1})) {
+        player.velocityY = jumpPower;
+        player.jumpFrames = 1;
+        global.jumpSound.play();
+      }
+    }
+  } else {
+    player.jumpFrames++;
+    if (player.jumpFrames >= maxJumpFrames || !keysDown[controls.jump]) {
+      player.jumpFrames = 0;
+    }
+  }
+  // only apply gravity if player is not jumping
+  if (player.jumpFrames == 0) {
+    // apply gravity
+    // TODO: should we apply gravity differently if jump is held?
+    fastestGravity = -8;
+    gravityAccel = 1;
+    if (player.velocityY > fastestGravity) {
+      player.velocityY -= gravityAccel;
+      if (player.velocityY < fastestGravity) {
+        player.velocityY = fastestGravity;
+      }
+    }
+  }
+  collisionMove(player)
+  if (player.y == 0) {
+    initLevel(global.currentLevel);
+  }
+
+  // update camera
+  camera.x = player.x - (viewWidthGame/2);
+  if (camera.x < 0) {
+    camera.x = 0;
+  }
+
+  ball++;
+  if (ball >= viewWidthGame) {
+      ball = 0;
+  }
+}
+
+function collisionMove(obj) {
+  if (obj.velocityX == 0 && obj.velocityY == 0)
+    return;
+
+  newX = obj.x + obj.velocityX;
+  newY = obj.y + obj.velocityY;
+  if (newX < 0) {
+    newX = 0;
+  } else if (newX + obj.width > global.currentLevel.gameWidth) {
+    newX = global.currentLevel.gameWidth - obj.width;
+  }
+  if (newY < 0) {
+    newY = 0;
+  }
+  // allow y to go as high as possible
+
+  if (newX == obj.x && newY == obj.y)
+    return;
+
+  var newObj = {x:obj.x, y:obj.y, width:obj.width,height:obj.height};
+  for(var iterator = twoDimIterator(newX - obj.x, newY - obj.y);;) {
+    var moveType = iterator.next();
+    if (moveType == 0)
+      break;
+    if (moveType == TwoDimMove.both) {
+      newObj.x += iterator.xIncrement;
+      newObj.y += iterator.yIncrement;
+      if (collision(newObj)) {
+        newObj.y -= iterator.yIncrement;
+        if (collision(newObj)) {
+          newObj.y += iterator.yIncrement;
+          newObj.x -= iterator.xIncrement;
+          if (collision(newObj)) {
+            newObj.y -= iterator.yIncrement;
+          }
+        }
+      }
+    } else if (moveType == TwoDimMove.x) {
+      newObj.x += iterator.xIncrement;
+      if (collision(newObj)) {
+        newObj.x -= iterator.xIncrement;
+      }
+    } else {
+      newObj.y += iterator.yIncrement;
+      if (collision(newObj)) {
+        newObj.y -= iterator.yIncrement;
+      }
+    }
+  }
+  obj.x = newObj.x;
+  obj.y = newObj.y;
+}
+
+// obj.x, obj.y, obj.width, obj.height
+function collision(obj) {
+  var yStart = snapToTile(obj.y);
+  for (var x = snapToTile(obj.x); x < obj.x + obj.width; x += TILE_GAME_SIZE) {
+    var tileX = gameToTile(x);
+    for (var y = yStart; y < obj.y + obj.height; y += TILE_GAME_SIZE) {
+      var tileY = gameToTile(y);
+      var tileInfo = getLevelTileInfo(tileX, tileY);
+      if (tileInfo && tileInfo.collision) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+
+function getLevelTileID(xTile, yTile) {
+  if (xTile < 0 || yTile < 0 ||
+    xTile >= global.currentLevel.tileWidth ||
+    yTile >= global.currentLevel.tileHeight)
+    return -1;
+  return global.currentLevel.tiles[xTile * global.currentLevel.tileHeight + yTile];
+}
+function getLevelTileInfo(xTile, yTile) {
+  var tileID = getLevelTileID(xTile, yTile);
+  if (tileID == -1)
+    return null;
+  return tileInfos[tileID];
+}
+
+function drawTile(xTile, yTile, xGame, yGame) {
+  var xPix = gameXToPix(xGame);
+  var yPix = gameYToPix(yGame);
+  var heightPix = TILE_PIXEL_SIZE * global.pixelsPerUnitY;
+
+  global.ctx.drawImage(global.tilesetImg,
+      xTile * TILE_PIXEL_SIZE, yTile * TILE_PIXEL_SIZE,
+      TILE_PIXEL_SIZE, TILE_PIXEL_SIZE,
+      xPix, yPix - heightPix,
+      TILE_PIXEL_SIZE * global.pixelsPerUnitX, heightPix);
+}
+
+var level1Config = {
+  tileWidth: 50,
+  tileHeight: 16,
+  startX: 2 * TILE_GAME_SIZE,
+  startY: 2 * TILE_GAME_SIZE,
+  ops: [
+    {type:'fillRect',tile:TileID.block,x: 0,y:1,width:20,height:1},
+    {type:'fillRect',tile:TileID.block,x: 0,y:0,width:20,height:1},
+    {type:'fillRect',tile:TileID.block ,x:14,y:5,width: 5,height:1},
+    {type:'fillRect',tile:TileID.topGround,x:30,y:0,width:20,height:2},
+    {type:'fillRect',tile:TileID.block ,x:40,y:2,width: 1,height:3},
+  ],
+};
+function buildLevel(levelConfig) {
+  var tiles = new Array(levelConfig.tileWidth * levelConfig.tileHeight);
+  for (var i = 0; i < tiles.length; i++) {
+    tiles[i] = -1;
+  }
+  for (var opIndex = 0; opIndex < levelConfig.ops.length; opIndex++) {
+    var op = levelConfig.ops[opIndex];
+    if (op.type == 'fillRect') {
+        for (var col = op.x; col < op.x + op.width; col++) {
+          for (var row = op.y; row < op.y + op.height; row++) {
+            tiles[col * levelConfig.tileHeight + row] = op.tile;
+          }
+        }
+    }
+  }
+  return {
+    tiles: tiles,
+    tileWidth: levelConfig.tileWidth,
+    tileHeight: levelConfig.tileHeight,
+    gameWidth: levelConfig.tileWidth * TILE_GAME_SIZE,
+    gameHeight: levelConfig.tileHeight * TILE_GAME_SIZE,
+    startX: levelConfig.startX,
+    startY: levelConfig.startY,
+  };
+}
+var level1 = buildLevel(level1Config);
+
+function alertReturn(msg) {
+  alert(msg);
+  return msg
+}
+
+// return the tile that contains the given coord
+function gameToTile(coord) {
+  return Math.floor(coord / TILE_GAME_SIZE);
+}
+// return the needed shift to move coord to the left or bottom of the tile
+function gameTileShift(coord)  {
+  return coord % TILE_GAME_SIZE;
+}
+
+// return the lower left tile coordinate containing the given coordinate
+function snapToTile(coord) {
+  var mod = coord % TILE_GAME_SIZE;
+  if (mod == 0)
+    return coord;
+  return coord - mod;
+}
+
+// Rendering Functions
+function renderBackground() {
+  // render a background
+  global.ctx.fillStyle = '#75f9f9';
+  global.ctx.fillRect(0, 0, global.canvas.width, global.canvas.height);
+
+  if (camera.x < 0 || camera.y < 0)
+    throw alertReturn("CODEBUG: negative camera no implemented");
+
+  var leftCameraLevelTile = gameToTile(camera.x);
+  var bottomCameraLevelTile = gameToTile(camera.y);
+  var xCameraShift = gameTileShift(camera.x);
+  var yCameraShift = gameTileShift(camera.y);
+
+  for (var xTileViewSlot = 0; ; xTileViewSlot++) {
+    var xLevelTile = leftCameraLevelTile + xTileViewSlot;
+    if (xLevelTile < 0)
+       continue; // TODO: use an equation to initialize xTileViewSlot instead of this
+    if (xLevelTile >= global.currentLevel.tileWidth)
+        break;
+    var tileLevelIndex = (xLevelTile * global.currentLevel.tileHeight) + bottomCameraLevelTile;
+    var gameX = xTileViewSlot * TILE_GAME_SIZE - xCameraShift;
+    if (gameX >= viewWidthGame)
+        break;
+    for (var yTileViewSlot = 0; ; yTileViewSlot++) {
+      var yLevelTile = bottomCameraLevelTile + yTileViewSlot;
+      if (yLevelTile < 0)
+         continue; // TODO: use an equation to initialize yTileViewSlot instead of this
+      if (yLevelTile >= global.currentLevel.tileHeight)
+          break;
+      var gameY = yTileViewSlot * TILE_GAME_SIZE - yCameraShift;
+      if (gameY >= viewHeightGame)
+          break;
+      var tile = global.currentLevel.tiles[tileLevelIndex];
+      if (tile != -1) {
+        var xTileSetIndex = tile % TILE_SET_COLUMN_COUNT;
+        var yTileSetIndex = Math.floor(tile / TILE_SET_COLUMN_COUNT);
+        drawTile(xTileSetIndex, yTileSetIndex, gameX, gameY);
+      }
+      tileLevelIndex++;
+    }
+  }
+}
+
+// GAME CODE
+function renderPlayer() {
+  drawTile(0, 0, player.x - camera.x, player.y - camera.y);
+}
+function renderBall(x, y) {
+  var xPix   = gameXToPix(x);
+  var yPix   = gameYToPix(y);
+  var radiusPix = 20;
+  global.ctx.fillStyle = '#f00';
+  global.ctx.beginPath();
+  global.ctx.arc(xPix, 100, radiusPix, 0, TWO_PI);
+  global.ctx.fill();
+}
+
+function gameXToPix(x) { return x * global.pixelsPerUnitX; }
+function gameYToPix(y) { return (viewHeightGame - y) * global.pixelsPerUnitY; }
+
+function renderGameGrid() {
+  for (var gameY = 0; gameY < viewHeightGame; gameY +=64) {
+      global.ctx.beginPath();
+      var yPix = gameYToPix(gameY);
+      global.ctx.moveTo(0, yPix);
+      global.ctx.lineTo(global.canvas.width, yPix);
+      global.ctx.strokeStyle = '#888';
+      global.ctx.stroke();
+      global.ctx.fillStyle = '#000';
+      global.ctx.font = '10px Arial black';
+      global.ctx.fillText(gameY + ' > ' + yPix, 0, yPix  - 10);
+  }
+  for (var gameX = 0; gameX < viewWidthGame; gameX += 64) {
+      global.ctx.beginPath();
+      var xPix = gameXToPix(gameX);
+      global.ctx.moveTo(xPix, 0);
+      global.ctx.lineTo(xPix, global.canvas.height);
+      global.ctx.strokeStyle = '#888';
+      global.ctx.stroke();
+      global.ctx.fillStyle = '#000';
+      global.ctx.font = '10px Arial black';
+      global.ctx.fillText(gameX + ' > ' + xPix.toFixed(0), xPix, 10);
+  }
+}
+function renderGame() {
+  if(global.updatesToPaint == 0) {
+    console.log("ERROR: render called but not ready to paint");
+  } else {
+    if(global.updatesToPaint > 1) {
+      console.log("WARNING: render missed " + (global.updatesToPaint - 1) + " frame(s)");
+    }
+    renderBackground();
+    //renderGameGrid();
+    //renderBall(ball, 100);
+    renderPlayer();
+    global.updatesToPaint = 0;
+  }
+}
+
+function gameIteration(iterationId) {
+  if(global.updatesToPaint > 0) {
+    console.log("WARNING: updating frame before it was rendered");
+  }
+  updateFrame();
+  global.updatesToPaint++;
+  if(global.updatesToPaint == 1) {
+    requestAnimationFrame(renderGame);
+  }
+}
+
+var SIZE_MODE_NO_SCALE = 0
+var SIZE_MODE_FIT_TO_WINDOW = 1;
+var SIZE_MODE_MAX = 1;
+var sizeMode = 0;
+function setSizeMode(newSizeMode) {
+  if (newSizeMode != sizeMode) {
+      sizeMode = newSizeMode;
+      updateCanvasSize();
+  }
+}
+function onSizeModeButtonClick() {
+    var newSizeMode = sizeMode + 1;
+    if (newSizeMode > SIZE_MODE_MAX) {
+      newSizeMode = 0;
+    }
+    setSizeMode(newSizeMode);
+}
+
+function updateCanvasSize() {
+  var newCanvasWidth;
+  var newCanvasHeight;
+  if (sizeMode == SIZE_MODE_FIT_TO_WINDOW) {
+    console.log("updateCanvasSize " + window.innerWidth + " x " + window.innerHeight);
+    newCanvasHeight = window.innerHeight
+    newCanvasWidth = window.innerHeight * widthHeightRatio
+    if (newCanvasWidth > window.innerWidth) {
+        newCanvasHeight = window.innerWidth / widthHeightRatio
+        newCanvasWidth = window.innerWidth
+    }
+  } else {
+    newCanvasWidth = viewWidthGame;
+    newCanvasHeight = viewHeightGame;
+  }
+  if (newCanvasWidth == global.canvas.width && newCanvasHeight == global.canvas.height)
+      return;
+
+  diffHeight = window.innerHeight - newCanvasHeight
+  diffWidth = window.innerWidth - newCanvasWidth
+  // NOTE: resetting the width/height seems to cause blinking
+  //       instead, I may want to create a new canvas, and then
+  //       draw it and then delete the old one
+  global.canvas.width = newCanvasWidth;
+  global.canvas.height = newCanvasHeight;
+  global.canvas.style.top = (diffHeight / 2) + "px"
+  global.canvas.style.left = (diffWidth / 2) + "px"
+  console.log(" canvasSize=" + newCanvasWidth + "x" + newCanvasHeight)
+
+  global.pixelsPerUnitX = newCanvasWidth / viewWidthGame
+  global.pixelsPerUnitY = newCanvasHeight / viewHeightGame
+  console.log("GAMESIZE x: " + viewWidthGame + ", y: " + viewHeightGame);
+  console.log("PPU      x: " + global.pixelsPerUnitX + ", y: " + global.pixelsPerUnitY);
+}
+
+var startEvents = {
+  bodyLoaded: false,
+  imagesLoaded: false,
+  audioLoaded: false,
+};
+function startEventTriggered() {
+  for (var event in startEvents) {
+    if (!startEvents[event]) {
+      console.log("not ready to start, " + event + " is false");
+      return;
+    }
+  }
+  console.log("all start events triggered, starting");
+  start();
+}
+
+function bodyOnResize() {
+  console.log("bodyOnResize " + window.innerWidth + "x" + window.innerHeight);
+  updateCanvasSize()
+}
+function bodyload() {
+  // Create Render objects
+  global.canvas = get('GameCanvas');
+  global.ctx = global.canvas.getContext("2d");
+  updateCanvasSize();
+  startEvents.bodyLoaded = true;
+  startEventTriggered();
+}
+
+function initLevel(level) {
+  global.currentLevel = level;
+  camera.x = 0;
+  camera.y = 0;
+  player.x = level.startX;
+  player.y = level.startX;
+  player.velocityX = 0;
+  player.velocityY = 0;
+  player.jumpFrames = 0;
+}
+
+function start() {
+  initLevel(level1);
+
+  global.updatesToPaint = 0;
+  renderBackground();
+  global.canvas.style.display = 'block';
+  global.fixedFpsLooper = makeFixedFpsLooper(20, gameIteration);
+  global.fixedFpsLooper.start();
+}
+
+var imageLoader = makeImageLoader();
+global.tilesetImg = imageLoader.addImage('tileset.png');
+imageLoader.addedAllImages(function() {
+    startEvents.imagesLoaded = true;
+    startEventTriggered();
+});
+
+var audioLoader = makeAudioLoader();
+global.jumpSound = audioLoader.addAudio('jump.modified.wav');
+audioLoader.addedAllAudios(function() {
+    startEvents.audioLoaded = true;
+    startEventTriggered();
+});
+
+</script>
+</head><body onload="bodyload()" onresize="bodyOnResize()" style="text-align:center">
+<canvas id="GameCanvas" style="display:none;position:absolute;imageSmoothingEnabled:false"></canvas>
+<div style="position:absolute;top:0">
+  <button onclick="onSizeModeButtonClick()">Scale Mode</button>
+</div>
+</body></html>
